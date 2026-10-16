@@ -112,15 +112,21 @@ export function timeline(cls) {
 }
 
 /**
- * Rolling average: mean percentage of the last `n` graded assignments, compared with the
- * class grade before them. Returns { pct, delta } or null.
+ * Rolling average: the class grade computed from only the last `n` graded assignments, using
+ * the class's category weights (categories with none of those assignments drop out, as usual).
+ * Returns { pct, count } or null.
  */
 export function recentAverage(cls, n) {
-  const graded = cls.assignments.filter((a) => isGraded(a) && a.date).sort((x, y) => x.date.localeCompare(y.date));
-  if (graded.length === 0) return null;
-  const last = graded.slice(-n);
-  const pct = (last.reduce((s, a) => s + a.score / a.max, 0) / last.length) * 100;
-  return { pct, count: last.length };
+  const recent = cls.assignments
+    .map((a, i) => ({ a, i }))
+    .filter(({ a }) => isGraded(a) && a.date)
+    .sort((x, y) => x.a.date.localeCompare(y.a.date))
+    .slice(-n);
+  if (recent.length === 0) return null;
+  const keep = new Set(recent.map(({ i }) => i));
+  const scores = new Map(cls.assignments.map((a, i) => [i, keep.has(i) ? a.score : null]));
+  const { pct } = classGrade(cls, scores);
+  return pct == null ? null : { pct, count: recent.length }; // e.g. all in a 0%-weight category
 }
 
 /**

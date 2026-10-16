@@ -76,9 +76,12 @@ async function unlock(box) {
 }
 
 function start() {
-  const fromUrl = new URLSearchParams(location.search).get('student');
+  const fromUrl = new URLSearchParams(location.search).get('student')?.toLowerCase();
+  const byName = data.students.find((s) => displayName(s).toLowerCase() === fromUrl)?.id;
   const ids = data.students.map((s) => s.id);
-  state.studentId = [fromUrl, store.get('student')].find((id) => ids.includes(id)) ?? ids[0];
+  state.studentId = [byName, fromUrl, store.get('student')].find((id) => ids.includes(id)) ?? ids[0];
+  let t;
+  addEventListener('resize', () => { clearTimeout(t); t = setTimeout(render, 150); });
   renderStudents();
   renderTerms();
   render();
@@ -122,6 +125,21 @@ function assumedPct(cls) {
   return state.whatIf.pct;
 }
 
+const today = () => new Date().toLocaleDateString('en-CA');
+const termInfo = (id) => config.calendar?.terms.find((t) => t.id === id);
+const periodLabel = (cls) => cls.semester ?? termInfo(cls.term)?.name ?? cls.term;
+
+/** The grading period that matters for this student right now: { name, end, days }. */
+function gradingPeriod() {
+  const cal = config.calendar;
+  if (!cal) return null;
+  const q = cal.terms.find((t) => t.end >= today()) ?? cal.terms[cal.terms.length - 1];
+  const sem = config.students?.[state.studentId]?.gradingPeriod === 'semester' && cal.semesters.find((x) => x.terms.includes(q.id));
+  const p = sem || q;
+  const days = Math.round((new Date(`${p.end}T12:00:00`) - new Date(`${today()}T12:00:00`)) / 864e5);
+  return { name: p.name, end: p.end, days };
+}
+
 const projected = (cls) => project(cls, assumedPct(cls), overridesFor(cls));
 const remainingCount = (cls) => cls.assignments.filter(isRemaining).length;
 const missingCount = (cls) => cls.assignments.filter((a) => a.missing && !a.exempt).length;
@@ -135,7 +153,7 @@ function pill(pct) {
 }
 
 function sparkline(points) {
-  const w = 96, h = 28, pad = 3;
+  const w = innerWidth >= 1400 ? 180 : innerWidth >= 1000 ? 130 : 96, h = 28, pad = 3;
   if (points.length < 2) return `<svg class="spark" width="${w}" height="${h}"></svg>`;
   // Scale to the data (min 10-pt span) so movement is visible; dashed lines mark letter cutoffs.
   const vals = points.map((p) => Math.min(p.pct, 100));
@@ -179,7 +197,10 @@ function renderSummary(list) {
   const graded = list.map(cur).filter((p) => p != null);
   const below = graded.filter((p) => !['A', 'B'].includes(letter(p))).length;
   const remaining = list.reduce((n, c) => n + remainingCount(c), 0);
+  const gp = gradingPeriod();
   $('#summary').innerHTML =
+    (gp ? stat(`${esc(gp.name)} ends`, fmtDate(gp.end), null,
+      gp.days > 0 ? `${gp.days} day${gp.days === 1 ? '' : 's'} left` : gp.days === 0 ? 'today' : 'ended') : '') +
     stat('GPA', fmtGpa(w), fmtGpa(gpa(list, config, projected)), 'weighted') +
     stat('Unweighted', fmtGpa(u), fmtGpa(gpa(list, config, projected, { weighted: false })), '4.0 scale') +
     stat('Classes', list.length, null, below ? `<span class="t-C">${below} below B</span>` : 'all A/B') +
@@ -195,7 +216,7 @@ function renderRow(cls) {
     arrow = delta > 2 ? '▲' : delta < -2 ? '▼' : '';
   }
   const lvl = { honors: 'H', ap: 'AP' }[cls.level];
-  const meta = [cls.teacher, cls.period && `Period ${cls.period}`, cls.term].filter(Boolean).map(esc).join(' · ');
+  const meta = [cls.teacher, cls.period && `Period ${cls.period}`, periodLabel(cls)].filter(Boolean).map(esc).join(' · ');
   const open = state.open.has(cls.id);
   return `
   <div class="cls" data-id="${esc(cls.id)}">
@@ -203,7 +224,7 @@ function renderRow(cls) {
       <div><div class="name">${esc(cls.name)}${lvl ? `<span class="level">${lvl}</span>` : ''}${missingCount(cls) ? `<span class="flag">${missingCount(cls)} missing</span>` : ''}</div>
         <div class="meta">${meta}</div></div>
       <div class="c-spark">${sparkline(timeline(cls))}</div>
-      <div class="c-recent recent" title="Average of last ${recent?.count ?? 0} graded assignments">
+      <div class="c-recent recent" title="Class grade from only the last ${recent?.count ?? 0} graded assignments, using the category weights">
         ${recent ? `<span class="t-${letter(recent.pct)}">${recent.pct.toFixed(0)}%</span> <span class="arrow">${arrow}</span>` : '—'}</div>
       <div class="c-now right">${pill(g.pct)}</div>
       ${state.whatIf.on ? `<div class="right">${pill(projected(cls))}</div>` : ''}
@@ -227,19 +248,30 @@ function renderDetail(cls, g) {
   const known = new Set(g.byCategory.map((c) => c.name));
   const uncounted = g.weighted ? [...new Set(cls.assignments.slice(0, cls.realCount).map((a) => a.category))].filter((c) => c && !known.has(c)) : [];
 
+  const remaining = cls.assignments.map((a, i) => ({ a, i })).filter(({ a }) => isRemaining(a));
+  const open = remaining.filter(({ i }) => !ov.has(i));
+  const openPts = open.reduce((n, { a }) => n + a.max, 0);
+  const floor = project(cls, 0, ov), ceiling = project(cls, 100, ov);
+  const gp = gradingPeriod();
+
+  // For each letter: the average needed on the open (not yet scored) remaining work.
   const targets = config.gradeScale.filter((s) => s.min > 0).map((s) => {
     const n = neededFor(cls, s.min, ov);
     let txt;
-    if (!n) txt = '<span class="muted">no open work</span>';
-    else if (n.impossible) txt = '<span class="muted">out of reach</span>';
-    else if (n.locked) txt = '<span class="t-A">locked in</span>';
-    else txt = `need <strong>${Math.ceil(n.pct)}%</strong> avg`;
-    return `<tr><td><span class="pill g-${s.letter}">${s.letter}</span></td><td>${txt}</td></tr>`;
+    if (!n) txt = (projected(cls) ?? -1) >= s.min ? '<span class="t-A">Yes</span>, on current scores' : '<span class="muted">No, on current scores</span>';
+    else if (n.impossible) txt = `<span class="muted">Not reachable with this work (tops out at ${ceiling.toFixed(1)}%)</span>`;
+    else if (n.locked) txt = `<span class="t-A">Guaranteed</span> <span class="muted">(even 0% leaves ${floor.toFixed(1)}%)</span>`;
+    else txt = `Average <strong>${Math.ceil(n.pct)}%</strong> or better`;
+    return `<tr><td style="width:3.5em"><span class="pill g-${s.letter}">${s.letter}</span></td><td>${txt}</td></tr>`;
   }).join('');
-
-  const remaining = cls.assignments.map((a, i) => ({ a, i })).filter(({ a }) => isRemaining(a));
+  const targetNote = open.length
+    ? `Based on the ${open.length} open assignment${open.length === 1 ? '' : 's'} below (${openPts} pts)${ov.size ? ', plus the scores you set' : ''}.
+       Scoring 0–100% on ${open.length === 1 ? 'it' : 'them'} lands between <strong>${floor.toFixed(1)}%</strong> and <strong>${ceiling.toFixed(1)}%</strong>.
+       Teachers keep posting work${gp ? ` until ${esc(gp.name)} ends ${fmtDate(gp.end)}` : ''}, so add expected tests below as what-ifs.`
+    : 'No open work to plan against. Add the tests or projects you expect below.';
+  const catAvg = new Map(g.byCategory.map((c) => [c.name, c.pct]));
   const remRows = remaining.map(({ a, i }) => `
-    <tr class="upcoming"><td>${esc(a.name)} <span class="tag">${esc(a.category ?? '')}</span>${a.extra != null ? ' <span class="tag">· what-if</span>' : ''}</td>
+    <tr class="upcoming"><td>${esc(a.name)} <span class="tag">${esc(a.category ?? '')}${catAvg.get(a.category) != null ? ` (avg ${catAvg.get(a.category).toFixed(0)}%)` : ''}</span>${a.extra != null ? ' <span class="tag">· what-if</span>' : ''}</td>
       <td class="num hide-sm">${a.extra != null
         ? `<button type="button" class="link" data-act="remove-extra" data-j="${a.extra}">remove</button>` : fmtDate(a.date)}</td>
       <td class="num">${a.max} pts</td>
@@ -264,7 +296,8 @@ function renderDetail(cls, g) {
   const asgRows = shown.map((a) => {
     const pct = a.score != null && a.max ? (a.score / a.max) * 100 : null;
     const l = letter(pct);
-    return `<tr><td class="hide-sm muted">${fmtDate(a.date)}</td>
+    const tShort = cls.semester && termInfo(a.term)?.short;
+    return `<tr><td class="hide-sm muted">${fmtDate(a.date)}${tShort ? ` <span class="tag">${tShort}</span>` : ''}</td>
       <td>${esc(a.name)}${a.missing ? '<span class="flag">missing</span>' : ''}${a.exempt ? ` <span class="tag">${a.unscored ? 'not scored' : 'exempt'}</span>` : ''}
         <div class="tag">${esc(a.category ?? '')}</div></td>
       <td class="num muted">${a.score != null ? `${fmtScore(a.score)} / ${a.max}` : ''}</td>
@@ -272,41 +305,47 @@ function renderDetail(cls, g) {
   }).join('');
 
   return `
-  <div class="detail">
-    <div class="grid2">
-      <div>
-        <h3>${g.weighted ? 'Category weights' : 'Grading'}</h3>
-        <table><thead><tr><th>Category</th><th class="num">Weight</th><th class="num">Average</th><th class="num">#</th></tr></thead>
-        <tbody>${catRows}</tbody></table>
-        ${uncounted.length ? `<p class="note">Not counted toward the grade (0% weight): ${uncounted.map(esc).join(', ')}</p>` : ''}
-        ${cls.reportedGrade != null && g.pct != null && Math.abs(cls.reportedGrade - g.pct) > 0.5
-          ? `<p class="note">Aspen shows ${cls.reportedGrade.toFixed(1)}%. This teacher may weight some assignments individually, so projections here are approximate.</p>` : ''}
+  <div class="detail"><div class="detail-cols">
+    <div class="col-plan">
+      <div class="grid2">
+        <div>
+          <h3>${g.weighted ? 'Category weights' : 'Grading'}</h3>
+          <table><thead><tr><th>Category</th><th class="num">Weight</th><th class="num">Average</th><th class="num">#</th></tr></thead>
+          <tbody>${catRows}</tbody></table>
+          ${uncounted.length ? `<p class="note">Not counted toward the grade (0% weight): ${uncounted.map(esc).join(', ')}</p>` : ''}
+          ${cls.reportedGrade != null && g.pct != null && Math.abs(cls.reportedGrade - g.pct) > 0.5
+            ? `<p class="note">Aspen shows ${cls.reportedGrade.toFixed(1)}%. This teacher may weight some assignments individually, so projections here are approximate.</p>` : ''}
+        </div>
+        <div>
+          <h3>What it takes to finish with…</h3>
+          <table><tbody>${targets}</tbody></table>
+          <p class="note">${targetNote}</p>
+        </div>
       </div>
-      <div>
-        <h3>To finish with…</h3>
-        <table><tbody>${targets}</tbody></table>
-        <p class="note">Average needed on ${remaining.length - [...ov.keys()].length} remaining assignment(s)${ov.size ? ', given the scores you set below' : ''}.</p>
-      </div>
+
+      <h3>Remaining work <span class="muted" style="text-transform:none;letter-spacing:0">· set a % to try a scenario</span></h3>
+      ${remaining.length ? `
+        <table><thead><tr><th>Assignment</th><th class="num hide-sm">Due</th><th class="num">Worth</th><th class="num">Assume %</th></tr></thead>
+        <tbody>${remRows}</tbody></table>
+        <p class="note">Projected: ${pill(projected(cls))}
+          ${ov.size ? ` <button type="button" class="link" data-act="clear">clear scores</button>` : ''}</p>`
+        : '<p class="note">Aspen lists no upcoming work for this class yet.</p>'}
+      ${addForm}
     </div>
 
-    <h3>Remaining work <span class="muted" style="text-transform:none;letter-spacing:0">· set a % to try a scenario</span></h3>
-    ${remaining.length ? `
-      <table><thead><tr><th>Assignment</th><th class="num hide-sm">Due</th><th class="num">Worth</th><th class="num">Assume %</th></tr></thead>
-      <tbody>${remRows}</tbody></table>
-      <p class="note">Projected: ${pill(projected(cls))}
-        ${ov.size ? ` <button type="button" class="link" data-act="clear">clear scores</button>` : ''}</p>`
-      : '<p class="note">Aspen lists no upcoming work for this class yet. Add the tests or projects you expect below.</p>'}
-    ${addForm}
-
-    <h3>Assignments</h3>
-    <div class="filters">
-      <input type="search" placeholder="Search assignments" value="${esc(f.q)}" data-act="q" aria-label="Search assignments">
-      <select data-act="cat" aria-label="Category"><option value="">All categories</option>
-        ${cats.map((c) => `<option ${c === f.cat ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
-      <label class="check"><input type="checkbox" data-act="missing" ${f.missing ? 'checked' : ''}> Missing only</label>
+    <div class="col-history">
+      <h3>Graded so far <span class="muted" style="text-transform:none;letter-spacing:0">· ${shown.length} shown</span></h3>
+      <div class="filters">
+        <input type="search" placeholder="Search assignments" value="${esc(f.q)}" data-act="q" aria-label="Search assignments">
+        <select data-act="cat" aria-label="Category"><option value="">All categories</option>
+          ${cats.map((c) => `<option ${c === f.cat ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
+        <label class="check"><input type="checkbox" data-act="missing" ${f.missing ? 'checked' : ''}> Missing only</label>
+      </div>
+      <div class="history"><table>
+        <thead><tr><th class="hide-sm">Due</th><th>Assignment</th><th class="num">Score</th><th class="num">%</th></tr></thead>
+        <tbody>${asgRows || '<tr><td colspan="4" class="muted">No matching assignments.</td></tr>'}</tbody></table></div>
     </div>
-    <table><tbody>${asgRows || '<tr><td class="muted">No matching assignments.</td></tr>'}</tbody></table>
-  </div>`;
+  </div></div>`;
 }
 
 function render() {
@@ -349,7 +388,7 @@ $('#students').addEventListener('click', (e) => {
   store.set('student', state.studentId);
   state.open.clear();
   const url = new URL(location.href);
-  url.searchParams.set('student', state.studentId);
+  url.searchParams.set('student', displayName(student()).toLowerCase());
   history.replaceState(null, '', url);
   renderStudents();
   renderTerms();
