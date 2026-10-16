@@ -106,7 +106,8 @@ export function timeline(cls) {
     included.set(graded[k].i, graded[k].a.score);
     if (k + 1 < graded.length && graded[k + 1].a.date === graded[k].a.date) continue;
     const scores = new Map([...blank, ...included]);
-    out.push({ date: graded[k].a.date, pct: classGrade(cls, scores).pct });
+    const { pct } = classGrade(cls, scores);
+    if (pct != null) out.push({ date: graded[k].a.date, pct }); // e.g. only 0%-weight work so far
   }
   return out;
 }

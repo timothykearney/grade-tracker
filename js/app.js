@@ -1,7 +1,8 @@
 import {
   mergeClass, classGrade, letterFor, gpa, timeline, recentAverage, project, neededFor, isRemaining,
-} from './grades.js';
-import { unseal } from './vault.js';
+} from './grades.js?v=5cf5cebea9';
+import { unseal } from './vault.js?v=5cf5cebea9';
+import { expectedAssignments } from './expected.js?v=5cf5cebea9';
 
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -15,15 +16,14 @@ const store = {
   set(k, v) { try { localStorage.setItem(`grades:${k}`, JSON.stringify(v)); } catch { /* private mode */ } },
 };
 
-let data, config;
+let data, config, expected = {};
 const state = {
   studentId: null,
   term: 'all',
   sort: store.get('sort') ?? 'period',
   whatIf: { on: false, pct: 85, mode: 'flat' },
   overrides: new Map(), // "classId:index" -> pct
-  open: new Set(),
-  filters: new Map(), // classId -> { q, cat, missing }
+  filters: new Map(), // classId -> { q, cat, status }
   extras: store.get('extras') ?? {}, // classId -> [{ name, category, max, pct }] hypothetical assignments
 };
 const saveExtras = () => store.set('extras', state.extras);
@@ -33,15 +33,17 @@ const getJson = (u) => fetch(u, { cache: 'no-cache' }).then((r) => {
   return r.json();
 });
 
-// Published site: data.enc.json holds { data, config } encrypted with the family passphrase.
+// Published site: data.enc.json holds { data, config, expected } encrypted with the family passphrase.
 // Local dev: falls back to the plain files.
 async function load() {
   let box = null;
   try { box = await getJson('data.enc.json'); } catch (e) { if (e.status !== 404) throw e; }
   if (box) {
-    ({ data, config } = await unlock(box));
+    ({ data, config, expected = {} } = await unlock(box));
   } else {
-    [data, config] = await Promise.all([getJson('data/grades.json'), getJson('config.json')]);
+    [data, config, expected] = await Promise.all([
+      getJson('data/grades.json'), getJson('config.json'), getJson('expected.json').catch(() => ({})),
+    ]);
   }
   start();
 }
@@ -82,6 +84,7 @@ function start() {
   state.studentId = [byName, fromUrl, store.get('student')].find((id) => ids.includes(id)) ?? ids[0];
   let t;
   addEventListener('resize', () => { clearTimeout(t); t = setTimeout(render, 150); });
+  addEventListener('hashchange', () => { render(); scrollTo(0, 0); });
   renderStudents();
   renderTerms();
   render();
@@ -93,12 +96,21 @@ const student = () => data.students.find((s) => s.id === state.studentId);
 const displayName = (s) => config.students?.[s.id]?.displayName ?? s.name.split(' ')[0];
 const letter = (pct) => letterFor(pct, config.gradeScale);
 
+/** A class ready for display: Aspen assignments, then pending expected ones, then this browser's what-ifs. */
+function prepare(c) {
+  const m = mergeClass(c, config);
+  const exp = expectedAssignments(m.assignments, expected[c.id]);
+  const extras = (state.extras[c.id] ?? []).map((e, j) => ({ ...e, score: null, extra: j }));
+  return {
+    ...m,
+    realCount: m.assignments.length,
+    extraStart: m.assignments.length + exp.length,
+    assignments: [...m.assignments, ...exp, ...extras],
+  };
+}
+
 function classes() {
-  const all = student().classes.map((c) => {
-    const m = mergeClass(c, config);
-    const extras = (state.extras[c.id] ?? []).map((e, j) => ({ ...e, score: null, extra: j }));
-    return { ...m, realCount: m.assignments.length, assignments: [...m.assignments, ...extras] };
-  });
+  const all = student().classes.map(prepare);
   const list = state.term === 'all' ? all : all.filter((c) => c.term === state.term);
   const cur = (c) => classGrade(c).pct ?? 101;
   const sorters = {
@@ -116,7 +128,7 @@ function overridesFor(cls) {
     const [id, i] = k.split(':');
     if (id === cls.id) m.set(Number(i), v);
   }
-  (state.extras[cls.id] ?? []).forEach((e, j) => { if (e.pct != null) m.set(cls.realCount + j, e.pct); });
+  (state.extras[cls.id] ?? []).forEach((e, j) => { if (e.pct != null) m.set(cls.extraStart + j, e.pct); });
   return m;
 }
 
@@ -152,21 +164,27 @@ function pill(pct) {
   return `<span class="pill g-${l}">${l}<span class="pct">${pct.toFixed(1)}</span></span>`;
 }
 
-function sparkline(points) {
-  const w = innerWidth >= 1400 ? 180 : innerWidth >= 1000 ? 130 : 96, h = 28, pad = 3;
-  if (points.length < 2) return `<svg class="spark" width="${w}" height="${h}"></svg>`;
+function sparkline(points, big = false) {
+  const w = big ? 560 : innerWidth >= 1400 ? 180 : innerWidth >= 1000 ? 130 : 96, h = big ? 150 : 28, pad = big ? 8 : 3;
+  const size = big ? `width="100%" viewBox="0 0 ${w} ${h}"` : `width="${w}" height="${h}" viewBox="0 0 ${w} ${h}"`;
+  if (points.length < 2) return big ? '<p class="note">Not enough graded work for a trend yet.</p>' : `<svg class="spark" width="${w}" height="${h}"></svg>`;
   // Scale to the data (min 10-pt span) so movement is visible; dashed lines mark letter cutoffs.
   const vals = points.map((p) => Math.min(p.pct, 100));
   let lo = Math.min(...vals) - 2, hi = Math.max(...vals) + 2;
   if (hi - lo < 10) { const mid = (hi + lo) / 2; lo = mid - 5; hi = mid + 5; }
   const x = (i) => pad + (i / (points.length - 1)) * (w - 2 * pad);
-  const y = (v) => pad + (1 - (Math.min(v, hi) - lo) / (hi - lo)) * (h - 2 * pad);
+  const bottom = big ? 18 : pad; // room for the date labels on the big chart
+  const y = (v) => pad + (1 - (Math.min(v, hi) - lo) / (hi - lo)) * (h - pad - bottom);
   const d = points.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.pct).toFixed(1)}`).join('');
   const refs = config.gradeScale.filter((s) => s.min > lo && s.min < hi)
-    .map((s) => `<line class="ref" x1="0" x2="${w}" y1="${y(s.min)}" y2="${y(s.min)}"/>`).join('');
+    .map((s) => `<line class="ref" x1="0" x2="${w}" y1="${y(s.min)}" y2="${y(s.min)}"/>${big
+      ? `<text class="axis" x="${pad}" y="${y(s.min) - 3}">${s.letter} ${s.min}%</text>` : ''}`).join('');
   const last = points[points.length - 1];
-  return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true">${refs}
-    <path class="line" d="${d}"/><circle class="t-${letter(last.pct)}" fill="currentColor" cx="${x(points.length - 1)}" cy="${y(last.pct)}" r="2.6"/></svg>`;
+  const ends = big ? `<text class="axis" x="${pad}" y="${h - 1}">${fmtDate(points[0].date)}</text>
+    <text class="axis" x="${w - pad}" y="${h - 1}" text-anchor="end">${fmtDate(last.date)} · ${last.pct.toFixed(1)}%</text>` : '';
+  const dots = big ? points.map((p, i) => `<circle class="pt" cx="${x(i).toFixed(1)}" cy="${y(p.pct).toFixed(1)}" r="1.8"><title>${fmtDate(p.date)}: ${p.pct.toFixed(1)}%</title></circle>`).join('') : '';
+  return `<svg class="spark${big ? ' big' : ''}" ${size} aria-hidden="${!big}">${refs}
+    <path class="line" d="${d}"/>${dots}<circle class="t-${letter(last.pct)}" fill="currentColor" cx="${x(points.length - 1)}" cy="${y(last.pct)}" r="${big ? 4 : 2.6}"/>${ends}</svg>`;
 }
 
 function renderStudents() {
@@ -206,7 +224,7 @@ function renderSummary(list) {
     stat('GPA', fmtGpa(w), fmtGpa(gpa(list, config, projected)), 'weighted') +
     stat('Unweighted', fmtGpa(u), fmtGpa(gpa(list, config, projected, { weighted: false })), '4.0 scale') +
     stat('Classes', list.length, null, below ? `<span class="t-C">${below} below B</span>` : 'all A/B') +
-    stat('Missing', `<span class="${missing ? 't-F' : ''}">${missing}</span>`, null, `${remaining} upcoming`);
+    stat('Missing', `<span class="${missing ? 't-F' : ''}">${missing}</span>`, null, `${remaining} open or expected`);
 }
 
 function renderRow(cls) {
@@ -219,25 +237,44 @@ function renderRow(cls) {
   }
   const lvl = { honors: 'H', ap: 'AP' }[cls.level];
   const meta = [cls.teacher, cls.period && `Period ${cls.period}`, periodLabel(cls)].filter(Boolean).map(esc).join(' · ');
-  const open = state.open.has(cls.id);
+  const exp = cls.extraStart - cls.realCount;
   return `
   <div class="cls" data-id="${esc(cls.id)}">
-    <button type="button" class="row" data-act="toggle" aria-expanded="${open}">
+    <a class="row" href="#class/${encodeURIComponent(cls.id)}">
       <div><div class="name">${esc(cls.name)}${lvl ? `<span class="level">${lvl}</span>` : ''}${missingCount(cls) ? `<span class="flag">${missingCount(cls)} missing</span>` : ''}</div>
-        <div class="meta">${meta}</div></div>
+        <div class="meta">${meta}${exp ? ` · ${exp} expected` : ''}</div></div>
       <div class="c-spark">${sparkline(timeline(cls))}</div>
       <div class="c-recent recent" title="Class grade from only the last ${recent?.count ?? 0} graded assignments, using the category weights">
         ${recent ? `<span class="t-${letter(recent.pct)}">${recent.pct.toFixed(0)}%</span> <span class="arrow">${arrow}</span>` : '—'}</div>
       <div class="c-now right">${pill(g.pct)}</div>
       ${state.whatIf.on ? `<div class="right">${pill(projected(cls))}</div>` : ''}
-    </button>
-    ${open ? renderDetail(cls, g) : ''}
+    </a>
   </div>`;
 }
 
-function renderDetail(cls, g) {
+const STATUS = {
+  graded: { label: 'Graded', tag: '' },
+  missing: { label: 'Missing', tag: '<span class="flag">missing</span>' },
+  open: { label: 'Open', tag: '<span class="chip">open</span>' },
+  expected: { label: 'Expected', tag: '<span class="chip chip-exp">expected</span>' },
+  whatif: { label: 'What-if', tag: '<span class="chip">what-if</span>' },
+  exempt: { label: 'Exempt', tag: '<span class="tag">exempt</span>' },
+  unscored: { label: 'Not scored', tag: '<span class="tag">not scored</span>' },
+};
+function statusOf(a) {
+  if (a.extra != null) return 'whatif';
+  if (a.expected) return 'expected';
+  if (a.exempt) return a.unscored ? 'unscored' : 'exempt';
+  if (a.missing) return 'missing';
+  return a.score == null ? 'open' : 'graded';
+}
+
+function renderClassPage(cls) {
+  const g = classGrade(cls);
   const ov = overridesFor(cls);
-  const f = state.filters.get(cls.id) ?? { q: '', cat: '', missing: false };
+  const f = state.filters.get(cls.id) ?? { q: '', cat: '', status: '' };
+  const gp = gradingPeriod();
+  const lvl = { honors: 'Honors', ap: 'AP / Advanced' }[cls.level];
 
   const catRows = g.byCategory.map((c) => {
     const l = letter(c.pct);
@@ -250,13 +287,11 @@ function renderDetail(cls, g) {
   const known = new Set(g.byCategory.map((c) => c.name));
   const uncounted = g.weighted ? [...new Set(cls.assignments.slice(0, cls.realCount).map((a) => a.category))].filter((c) => c && !known.has(c)) : [];
 
-  const remaining = cls.assignments.map((a, i) => ({ a, i })).filter(({ a }) => isRemaining(a));
+  const indexed = cls.assignments.map((a, i) => ({ a, i, st: statusOf(a) }));
+  const remaining = indexed.filter(({ a }) => isRemaining(a));
   const open = remaining.filter(({ i }) => !ov.has(i));
   const openPts = open.reduce((n, { a }) => n + a.max, 0);
   const floor = project(cls, 0, ov), ceiling = project(cls, 100, ov);
-  const gp = gradingPeriod();
-
-  // For each letter: the average needed on the open (not yet scored) remaining work.
   const targets = config.gradeScale.filter((s) => s.min > 0).map((s) => {
     const n = neededFor(cls, s.min, ov);
     let txt;
@@ -267,90 +302,124 @@ function renderDetail(cls, g) {
     return `<tr><td style="width:3.5em"><span class="pill g-${s.letter}">${s.letter}</span></td><td>${txt}</td></tr>`;
   }).join('');
   const targetNote = open.length
-    ? `Based on the ${open.length} open assignment${open.length === 1 ? '' : 's'} below (${openPts} pts)${ov.size ? ', plus the scores you set' : ''}.
-       Scoring 0–100% on ${open.length === 1 ? 'it' : 'them'} lands between <strong>${floor.toFixed(1)}%</strong> and <strong>${ceiling.toFixed(1)}%</strong>.
-       Teachers keep posting work${gp ? ` until ${esc(gp.name)} ends ${fmtDate(gp.end)}` : ''}, so add expected tests below as what-ifs.`
-    : 'No open work to plan against. Add the tests or projects you expect below.';
-  const catAvg = new Map(g.byCategory.map((c) => [c.name, c.pct]));
-  const remRows = remaining.map(({ a, i }) => `
-    <tr class="upcoming"><td>${esc(a.name)} <span class="tag">${esc(a.category ?? '')}${catAvg.get(a.category) != null ? ` (avg ${catAvg.get(a.category).toFixed(0)}%)` : ''}</span>${a.extra != null ? ' <span class="tag">· what-if</span>' : ''}</td>
-      <td class="num hide-sm">${a.extra != null
-        ? `<button type="button" class="link" data-act="remove-extra" data-j="${a.extra}">remove</button>` : fmtDate(a.date)}</td>
-      <td class="num">${a.max} pts</td>
-      <td class="num"><input class="pct-in ${ov.has(i) ? 'set' : ''}" type="number" min="0" max="120" step="1"
-        data-act="override" data-i="${i}" ${a.extra != null ? `data-j="${a.extra}"` : ''} value="${ov.has(i) ? ov.get(i) : ''}"
-        placeholder="${Math.round(assumedPct(cls))}" aria-label="Assumed % on ${esc(a.name)}"></td></tr>`).join('');
-  const weightedCats = g.weighted ? g.byCategory.map((c) => c.name) : [];
-  const addForm = `
-    <form class="filters add-extra" data-act="add-extra">
-      <input type="text" name="name" placeholder="Add a what-if assignment (e.g. Final exam)" aria-label="Assignment name">
-      ${weightedCats.length ? `<select name="category" aria-label="Category">${weightedCats.map((c) => `<option>${esc(c)}</option>`).join('')}</select>` : ''}
-      <input class="pct-in" type="number" name="max" min="1" step="1" value="100" aria-label="Points"> <span class="check">pts</span>
-      <button type="submit" class="btn">Add</button>
-    </form>`;
+    ? `Based on ${open.length} open, expected or what-if assignment${open.length === 1 ? '' : 's'} (${openPts} pts)${ov.size ? ', plus the scores you set' : ''}.
+       Scoring 0–100% on ${open.length === 1 ? 'it' : 'them'} lands between <strong>${floor.toFixed(1)}%</strong> and <strong>${ceiling.toFixed(1)}%</strong>.`
+    : 'No open work to plan against yet. Add expected assignments below.';
 
-  const cats = [...new Set(cls.assignments.slice(0, cls.realCount).map((a) => a.category).filter(Boolean))];
+  const catAvg = new Map(g.byCategory.map((c) => [c.name, c.pct]));
+  const cats = [...new Set(cls.assignments.map((a) => a.category).filter(Boolean))];
   const q = f.q.toLowerCase();
-  const shown = cls.assignments
-    .filter((a) => !isRemaining(a))
-    .filter((a) => (!f.cat || a.category === f.cat) && (!f.missing || a.missing) && (!q || a.name.toLowerCase().includes(q)))
-    .sort((x, y) => (y.date ?? '').localeCompare(x.date ?? ''));
-  const asgRows = shown.map((a) => {
+  const match = ({ a, st }) => (!f.cat || a.category === f.cat) && (!f.status || st === f.status) && (!q || a.name.toLowerCase().includes(q));
+  const upcoming = remaining.filter(match).sort((x, y) => (x.a.date ?? '9999').localeCompare(y.a.date ?? '9999'));
+  const past = indexed.filter((r) => !isRemaining(r.a) && match(r)).sort((x, y) => (y.a.date ?? '').localeCompare(x.a.date ?? ''));
+  const counts = {};
+  for (const { st } of indexed) counts[st] = (counts[st] ?? 0) + 1;
+
+  const row = ({ a, i, st }) => {
     const pct = a.score != null && a.max ? (a.score / a.max) * 100 : null;
     const l = letter(pct);
     const tShort = cls.semester && termInfo(a.term)?.short;
-    return `<tr><td class="hide-sm muted">${fmtDate(a.date)}${tShort ? ` <span class="tag">${tShort}</span>` : ''}</td>
-      <td>${esc(a.name)}${a.missing ? '<span class="flag">missing</span>' : ''}${a.exempt ? ` <span class="tag">${a.unscored ? 'not scored' : 'exempt'}</span>` : ''}
-        <div class="tag">${esc(a.category ?? '')}</div></td>
-      <td class="num muted">${a.score != null ? `${fmtScore(a.score)} / ${a.max}` : ''}</td>
-      <td class="num">${l && !a.exempt ? `<span class="t-${l}">${pct.toFixed(0)}%</span>` : ''}</td></tr>`;
-  }).join('');
+    const late = (st === 'expected' || st === 'open') && a.date && a.date < today();
+    const input = isRemaining(a) ? `<input class="pct-in ${ov.has(i) ? 'set' : ''}" type="number" min="0" max="120" step="1"
+        data-act="override" data-i="${i}" ${a.extra != null ? `data-j="${a.extra}"` : ''} value="${ov.has(i) ? ov.get(i) : ''}"
+        placeholder="${Math.round(assumedPct(cls))}" aria-label="Assumed % on ${esc(a.name)}">` : '';
+    return `<tr class="st-${st}">
+      <td class="nowrap muted">${fmtDate(a.date) || '—'}${tShort ? ` <span class="tag">${tShort}</span>` : ''}</td>
+      <td>${esc(a.name)} ${STATUS[st].tag}${late ? ` <span class="tag">${st === 'expected' ? 'date passed; not in Aspen yet' : 'past due, ungraded'}</span>` : ''}
+        ${a.note ? `<div class="tag">${esc(a.note)}</div>` : ''}
+        <div class="tag cat-sm">${esc(a.category ?? '')}</div></td>
+      <td class="hide-sm">${esc(a.category ?? '')}${isRemaining(a) && catAvg.get(a.category) != null ? ` <span class="tag">avg ${catAvg.get(a.category).toFixed(0)}%</span>` : ''}</td>
+      <td class="num nowrap">${a.score != null ? `${fmtScore(a.score)} / ${a.max}` : `<span class="muted">${a.max} pts</span>`}</td>
+      <td class="num">${l && !a.exempt ? `<span class="t-${l}">${pct.toFixed(0)}%</span>` : input}</td>
+      <td class="num">${a.extra != null ? `<button type="button" class="link" data-act="remove-extra" data-j="${a.extra}" aria-label="Remove what-if">×</button>` : ''}</td>
+    </tr>`;
+  };
+  const group = (title, rows, extra = '') => rows.length
+    ? `<tr class="group"><td colspan="6">${title} <span class="muted">(${rows.length})</span>${extra}</td></tr>${rows.map(row).join('')}` : '';
+
+  const weightedCats = g.weighted ? g.byCategory.map((c) => c.name) : [];
+  const statusOpts = Object.entries(STATUS).filter(([k]) => counts[k])
+    .map(([k, v]) => `<option value="${k}" ${f.status === k ? 'selected' : ''}>${v.label} (${counts[k]})</option>`).join('');
 
   return `
-  <div class="detail"><div class="detail-cols">
-    <div class="col-plan">
-      <div class="grid2">
-        <div>
-          <h3>${g.weighted ? 'Category weights' : 'Grading'}</h3>
-          <table><thead><tr><th>Category</th><th class="num">Weight</th><th class="num">Average</th><th class="num">#</th></tr></thead>
-          <tbody>${catRows}</tbody></table>
-          ${uncounted.length ? `<p class="note">Not counted toward the grade (0% weight): ${uncounted.map(esc).join(', ')}</p>` : ''}
-          ${cls.reportedGrade != null && g.pct != null && Math.abs(cls.reportedGrade - g.pct) > 0.5
-            ? `<p class="note">Aspen shows ${cls.reportedGrade.toFixed(1)}%. This teacher may weight some assignments individually, so projections here are approximate.</p>` : ''}
-        </div>
-        <div>
-          <h3>What it takes to finish with…</h3>
-          <table><tbody>${targets}</tbody></table>
-          <p class="note">${targetNote}</p>
-        </div>
-      </div>
-
-      <h3>Remaining work <span class="muted" style="text-transform:none;letter-spacing:0">· set a % to try a scenario</span></h3>
-      ${remaining.length ? `
-        <table><thead><tr><th>Assignment</th><th class="num hide-sm">Due</th><th class="num">Worth</th><th class="num">Assume %</th></tr></thead>
-        <tbody>${remRows}</tbody></table>
-        <p class="note">Projected: ${pill(projected(cls))}
-          ${ov.size ? ` <button type="button" class="link" data-act="clear">clear scores</button>` : ''}</p>`
-        : '<p class="note">Aspen lists no upcoming work for this class yet.</p>'}
-      ${addForm}
+  <a class="back" href="#">← All classes</a>
+  <header class="cp-head">
+    <div>
+      <h2>${esc(cls.name)}${lvl ? ` <span class="level">${lvl}</span>` : ''}</h2>
+      <div class="meta">${[cls.teacher, periodLabel(cls)].filter(Boolean).map(esc).join(' · ')}${gp ? ` · ends ${fmtDate(gp.end)} (${gp.days} days)` : ''}</div>
     </div>
-
-    <div class="col-history">
-      <h3>Graded so far <span class="muted" style="text-transform:none;letter-spacing:0">· ${shown.length} shown</span></h3>
-      <div class="filters">
-        <input type="search" placeholder="Search assignments" value="${esc(f.q)}" data-act="q" aria-label="Search assignments">
-        <select data-act="cat" aria-label="Category"><option value="">All categories</option>
-          ${cats.map((c) => `<option ${c === f.cat ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
-        <label class="check"><input type="checkbox" data-act="missing" ${f.missing ? 'checked' : ''}> Missing only</label>
-      </div>
-      <div class="history"><table>
-        <thead><tr><th class="hide-sm">Due</th><th>Assignment</th><th class="num">Score</th><th class="num">%</th></tr></thead>
-        <tbody>${asgRows || '<tr><td colspan="4" class="muted">No matching assignments.</td></tr>'}</tbody></table></div>
+    <div class="cp-grades">
+      <div><div class="col-h">Now</div>${pill(g.pct)}</div>
+      ${remaining.length ? `<div><div class="col-h">Projected</div>${pill(projected(cls))}</div>` : ''}
+      ${cls.reportedGrade != null ? `<div><div class="col-h">Aspen</div><span class="pill none">${cls.reportedGrade.toFixed(1)}</span></div>` : ''}
     </div>
-  </div></div>`;
+  </header>
+  ${cls.reportedGrade != null && g.pct != null && Math.abs(cls.reportedGrade - g.pct) > 0.5
+    ? `<p class="note">Aspen shows ${cls.reportedGrade.toFixed(1)}%. This teacher may weight some assignments individually, so projections here are approximate.</p>` : ''}
+
+  <div class="cp-top">
+    <section class="card"><h3>Running grade</h3>${sparkline(timeline(cls), true)}</section>
+    <section class="card">
+      <h3>${g.weighted ? 'Category weights' : 'Grading'}</h3>
+      <table><thead><tr><th>Category</th><th class="num">Weight</th><th class="num">Average</th><th class="num">#</th></tr></thead>
+      <tbody>${catRows}</tbody></table>
+      ${uncounted.length ? `<p class="note">Not counted toward the grade (0% weight): ${uncounted.map(esc).join(', ')}</p>` : ''}
+    </section>
+    <section class="card">
+      <h3>What it takes to finish with…</h3>
+      <table><tbody>${targets}</tbody></table>
+      <p class="note">${targetNote}</p>
+    </section>
+  </div>
+
+  <section class="card">
+    <h3>All assignments</h3>
+    <div class="filters">
+      <input type="search" placeholder="Search assignments" value="${esc(f.q)}" data-act="q" aria-label="Search assignments">
+      <select data-act="cat" aria-label="Category"><option value="">All categories</option>
+        ${cats.map((c) => `<option ${c === f.cat ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
+      <select data-act="status" aria-label="Status"><option value="">All statuses</option>${statusOpts}</select>
+    </div>
+    <div class="table-scroll"><table class="asg">
+      <thead><tr><th>Date</th><th>Assignment</th><th class="hide-sm">Category</th><th class="num">Score</th><th class="num">%</th><th></th></tr></thead>
+      <tbody>
+        ${group('Coming up', upcoming, ov.size ? ` · <button type="button" class="link" data-act="clear">clear scores</button>` : '')}
+        ${group('Graded and past', past)}
+        ${upcoming.length + past.length ? '' : '<tr><td colspan="6" class="muted">No matching assignments.</td></tr>'}
+      </tbody></table></div>
+    <p class="note">Type a % next to anything coming up to try a scenario. Blank ones assume ${state.whatIf.mode === 'recent' ? 'the recent average' : `${state.whatIf.pct}%`} (the What-if slider).</p>
+  </section>
+
+  <section class="card">
+    <h3>Plan for work that isn't posted yet</h3>
+    <form class="filters add-extra" data-act="add-extra">
+      <input type="text" name="name" placeholder="Quick what-if (e.g. Unit 4 Test)" aria-label="Assignment name">
+      ${weightedCats.length ? `<select name="category" aria-label="Category">${weightedCats.map((c) => `<option>${esc(c)}</option>`).join('')}</select>` : ''}
+      <input class="pct-in" type="number" name="max" min="1" step="1" value="100" aria-label="Points"> <span class="check">pts</span>
+      <button type="submit" class="btn">Add what-if</button>
+    </form>
+    <p class="note">What-ifs stay in this browser only. To add an <strong>expected</strong> assignment that everyone sees and that stays until Aspen posts it, ask Claude or run:<br>
+      <code>npm run expect -- add ${esc(cls.id)} "Unit 4 Test" --points 100${weightedCats.length ? ` --category "${esc(weightedCats[0])}"` : ''} --date 11/5</code></p>
+  </section>`;
+}
+
+function currentClassId() {
+  const m = location.hash.match(/^#class\/(.+)$/);
+  return m ? decodeURIComponent(m[1]) : null;
 }
 
 function render() {
+  const id = currentClassId();
+  if (id && !student().classes.some((c) => c.id === id)) {
+    const owner = data.students.find((s) => s.classes.some((c) => c.id === id));
+    if (owner) { state.studentId = owner.id; renderStudents(); renderTerms(); }
+  }
+  const cls = id && student().classes.find((c) => c.id === id);
+  const page = $('#classpage');
+  document.body.classList.toggle('on-class', Boolean(cls));
+  page.hidden = !cls;
+  if (cls) page.innerHTML = renderClassPage(prepare(cls));
+
   const list = classes();
   renderSummary(list);
   $('#whatif').classList.toggle('on', state.whatIf.on);
@@ -368,17 +437,13 @@ function render() {
   $('#forget')?.addEventListener('click', () => { store.set('passphrase', null); location.reload(); });
 }
 
-// Re-render one class's detail without losing focus in its search box.
-function rerenderClass(id, focusSel) {
-  const cls = classes().find((c) => c.id === id);
-  const node = document.querySelector(`.cls[data-id="${CSS.escape(id)}"]`);
-  if (!cls || !node) return render();
-  node.outerHTML = renderRow(cls);
-  if (focusSel) {
-    const input = document.querySelector(`.cls[data-id="${CSS.escape(id)}"] ${focusSel}`);
-    input?.focus();
-    if (input?.setSelectionRange) input.setSelectionRange(input.value.length, input.value.length);
-  }
+// Re-render the class page without losing focus in its search box.
+function rerenderPage(focusSel) {
+  render();
+  if (!focusSel) return;
+  const input = $(`#classpage ${focusSel}`);
+  input?.focus();
+  if (input?.setSelectionRange) input.setSelectionRange(input.value.length, input.value.length);
 }
 
 // ---------- events ----------
@@ -388,9 +453,9 @@ $('#students').addEventListener('click', (e) => {
   if (!b) return;
   state.studentId = b.dataset.id;
   store.set('student', state.studentId);
-  state.open.clear();
   const url = new URL(location.href);
   url.searchParams.set('student', displayName(student()).toLowerCase());
+  url.hash = '';
   history.replaceState(null, '', url);
   renderStudents();
   renderTerms();
@@ -410,22 +475,20 @@ $('#whatif-recent').addEventListener('click', () => {
   render();
 });
 
-const cl = $('#classes');
+const cp = $('#classpage');
+const pageId = () => currentClassId();
 const fil = (id) => {
-  if (!state.filters.has(id)) state.filters.set(id, { q: '', cat: '', missing: false });
+  if (!state.filters.has(id)) state.filters.set(id, { q: '', cat: '', status: '' });
   return state.filters.get(id);
 };
 
-cl.addEventListener('click', (e) => {
+cp.addEventListener('click', (e) => {
   const t = e.target.closest('[data-act]');
   if (!t) return;
-  const id = t.closest('.cls').dataset.id;
-  if (t.dataset.act === 'toggle') {
-    state.open.has(id) ? state.open.delete(id) : state.open.add(id);
-    rerenderClass(id);
-  } else if (t.dataset.act === 'clear') {
+  const id = pageId();
+  if (t.dataset.act === 'clear') {
     for (const k of [...state.overrides.keys()]) if (k.startsWith(`${id}:`)) state.overrides.delete(k);
-    for (const e of state.extras[id] ?? []) e.pct = null;
+    for (const x of state.extras[id] ?? []) x.pct = null;
     saveExtras();
     render();
   } else if (t.dataset.act === 'remove-extra') {
@@ -436,20 +499,17 @@ cl.addEventListener('click', (e) => {
   }
 });
 
-cl.addEventListener('input', (e) => {
-  const t = e.target;
-  if (t.dataset.act !== 'q') return;
-  const id = t.closest('.cls').dataset.id;
-  fil(id).q = t.value;
-  rerenderClass(id, 'input[data-act="q"]');
+cp.addEventListener('input', (e) => {
+  if (e.target.dataset.act !== 'q') return;
+  fil(pageId()).q = e.target.value;
+  rerenderPage('input[data-act="q"]');
 });
 
-cl.addEventListener('change', (e) => {
+cp.addEventListener('change', (e) => {
   const t = e.target;
-  const id = t.closest('.cls')?.dataset.id;
-  if (!id) return;
-  if (t.dataset.act === 'cat') { fil(id).cat = t.value; rerenderClass(id); }
-  if (t.dataset.act === 'missing') { fil(id).missing = t.checked; rerenderClass(id); }
+  const id = pageId();
+  if (t.dataset.act === 'cat') { fil(id).cat = t.value; render(); }
+  if (t.dataset.act === 'status') { fil(id).status = t.value; render(); }
   if (t.dataset.act === 'override') {
     const pct = t.value === '' ? null : Math.max(0, Math.min(120, Number(t.value)));
     if (t.dataset.j != null) {
@@ -459,23 +519,21 @@ cl.addEventListener('change', (e) => {
       const key = `${id}:${t.dataset.i}`;
       if (pct == null) state.overrides.delete(key); else state.overrides.set(key, pct);
     }
-    if (!state.whatIf.on) { state.whatIf.on = true; $('#whatif-on').checked = true; }
-    render(); // GPA projection changes too
+    render();
   }
 });
 
-cl.addEventListener('submit', (e) => {
+cp.addEventListener('submit', (e) => {
   const form = e.target.closest('form[data-act="add-extra"]');
   if (!form) return;
   e.preventDefault();
-  const id = form.closest('.cls').dataset.id;
+  const id = pageId();
   const fd = new FormData(form);
   const max = Number(fd.get('max'));
   if (!(max > 0)) return;
   const category = fd.get('category') ?? null;
   (state.extras[id] ??= []).push({ name: String(fd.get('name') || '').trim() || `What-if ${category ?? 'assignment'}`, category, max, pct: null });
   saveExtras();
-  if (!state.whatIf.on) { state.whatIf.on = true; $('#whatif-on').checked = true; }
   render();
 });
 

@@ -189,3 +189,36 @@ body::before { left: 0; }
 body::after { right: 0; }
 .brand { display: inline-flex; align-items: center; gap: 9px; }
 .brand .logo { flex: none; }
+
+/* Class list rows are links to the class page */
+a.row { color: inherit; text-decoration: none; }
+
+/* Class page */
+body.on-class #summary, body.on-class .toolbar, body.on-class #classes { display: none; }
+.classpage { margin-top: 16px; }
+.back { display: inline-block; color: var(--muted); text-decoration: none; font-size: 13px; margin-bottom: 10px; }
+.back:hover { color: var(--text); }
+.cp-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; margin-bottom: 14px; }
+.cp-head h2 { font-size: 22px; font-weight: 650; letter-spacing: -0.01em; margin: 0 0 2px; }
+.cp-head .meta { color: var(--muted); font-size: 13px; }
+.cp-grades { display: flex; gap: 14px; }
+.cp-grades .col-h { margin-bottom: 4px; }
+.cp-grades .pill { font-size: 17px; padding: 5px 11px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 4px 16px 14px; margin-bottom: 14px; min-width: 0; }
+.cp-top { display: grid; grid-template-columns: 1fr; gap: 0 14px; }
+@media (min-width: 900px) { .cp-top { grid-template-columns: 1fr 1fr; } .cp-top > :first-child { grid-column: 1 / -1; } }
+@media (min-width: 1300px) { .cp-top { grid-template-columns: 1.2fr 1fr 1fr; } .cp-top > :first-child { grid-column: auto; } }
+.spark.big { display: block; max-height: 190px; }
+.spark.big .line { stroke: var(--muted); stroke-width: 1.5; }
+.spark .pt { fill: var(--faint); }
+.spark .axis { fill: var(--faint); font-size: 10px; }
+.table-scroll { overflow-x: auto; }
+table.asg td { vertical-align: top; }
+.asg tr.group td { background: var(--hover); font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); padding: 6px; }
+.asg tr.st-expected td, .asg tr.st-whatif td { background: color-mix(in srgb, var(--hover) 45%, transparent); }
+.nowrap { white-space: nowrap; }
+.chip { font-size: 11px; font-weight: 600; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 7px; margin-left: 4px; white-space: nowrap; }
+.chip-exp { border-style: dashed; color: var(--text); }
+.cat-sm { display: none; }
+code { font-family: var(--mono); font-size: 12px; background: var(--hover); padding: 2px 6px; border-radius: 5px; display: inline-block; margin-top: 4px; word-break: break-all; }
+@media (max-width: 680px) { .cat-sm { display: block; } .cp-grades .pill { font-size: 15px; } }
