@@ -180,3 +180,12 @@ body.locked main > :not(#lock), body.locked .seg { display: none; }
   .history { max-height: 560px; overflow: auto; border-top: 1px solid var(--line); }
   .history thead th { position: sticky; top: 0; background: var(--surface); }
 }
+
+/* Which kid: a thin colored strip down each side of the window. */
+body::before, body::after {
+  content: ""; position: fixed; top: 0; bottom: 0; width: 3px; background: var(--kid, transparent); z-index: 10; pointer-events: none;
+}
+body::before { left: 0; }
+body::after { right: 0; }
+.brand { display: inline-flex; align-items: center; gap: 9px; }
+.brand .logo { flex: none; }

@@ -170,6 +170,8 @@ function sparkline(points) {
 }
 
 function renderStudents() {
+  // Side borders identify whose dashboard this is.
+  document.documentElement.style.setProperty('--kid', config.students?.[state.studentId]?.color ?? 'transparent');
   $('#students').innerHTML = data.students.map((s) =>
     `<button type="button" role="tab" data-id="${esc(s.id)}" aria-selected="${s.id === state.studentId}">${esc(displayName(s))}</button>`).join('');
 }
