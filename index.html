@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Grade Tracker</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%231f8a4c'/><text x='16' y='23' font-size='19' font-family='system-ui' font-weight='700' text-anchor='middle' fill='white'>A</text></svg>">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap top-row">
+      <h1>Grades</h1>
+      <div class="seg" id="students" role="tablist" aria-label="Student"></div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <form id="lock" class="lock" hidden autocomplete="on">
+      <h2>Enter the family passphrase</h2>
+      <input type="text" name="username" value="family" autocomplete="username" hidden>
+      <input type="password" name="pass" autocomplete="current-password" aria-label="Passphrase" required>
+      <label class="check"><input type="checkbox" name="remember" checked> Remember on this device</label>
+      <button type="submit" class="btn">Unlock</button>
+      <p class="lock-msg note" aria-live="polite"></p>
+    </form>
+    <section class="summary" id="summary" aria-live="polite"></section>
+
+    <section class="whatif" id="whatif">
+      <label class="switch">
+        <input type="checkbox" id="whatif-on">
+        <span>What-if</span>
+      </label>
+      <div class="whatif-body">
+        <span class="muted">Remaining work averages</span>
+        <input type="range" id="whatif-pct" min="0" max="100" step="1" value="85" aria-label="Assumed score on remaining work">
+        <output id="whatif-out">85%</output>
+        <button type="button" class="link" id="whatif-recent" title="Use each class's recent average">use recent avg</button>
+      </div>
+    </section>
+
+    <div class="toolbar">
+      <select id="term" aria-label="Term"></select>
+      <select id="sort" aria-label="Sort classes">
+        <option value="period">Sort: default</option>
+        <option value="low">Sort: lowest grade</option>
+        <option value="high">Sort: highest grade</option>
+        <option value="name">Sort: name</option>
+      </select>
+    </div>
+
+    <section id="classes" class="classes"></section>
+
+    <footer class="foot muted" id="foot"></footer>
+  </main>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
