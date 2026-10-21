@@ -1,8 +1,9 @@
 import {
   mergeClass, classGrade, letterFor, gpa, timeline, recentAverage, project, neededFor, isRemaining,
-} from './grades.js?v=5cf5cebea9';
-import { unseal } from './vault.js?v=5cf5cebea9';
-import { expectedAssignments } from './expected.js?v=5cf5cebea9';
+} from './grades.js?v=eb698fd18b';
+import { unseal } from './vault.js?v=eb698fd18b';
+import { expectedAssignments } from './expected.js?v=eb698fd18b';
+import { aggregate, weekStart, addDays, monthsBetween } from './calendar.js?v=eb698fd18b';
 
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -24,6 +25,7 @@ const state = {
   whatIf: { on: false, pct: 85, mode: 'flat' },
   overrides: new Map(), // "classId:index" -> pct
   filters: new Map(), // classId -> { q, cat, status }
+  cal: { classId: '', sel: null }, // calendar filter and selected day/week ({ kind, key })
   extras: store.get('extras') ?? {}, // classId -> [{ name, category, max, pct }] hypothetical assignments
 };
 const saveExtras = () => store.set('extras', state.extras);
@@ -403,6 +405,93 @@ function renderClassPage(cls) {
   </section>`;
 }
 
+// ---------- calendar ----------
+
+const DOW = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const fmtLong = (d) => new Date(`${d}T12:00:00`).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+
+function calCell(b, label, attrs, extraClass = '') {
+  if (!b) return `<div class="day none ${extraClass}"><span class="dnum">${label}</span></div>`;
+  const l = letter(b.pct);
+  return `<button type="button" class="day g-${l} ${extraClass}" ${attrs}
+      title="${b.n} assignment${b.n === 1 ? '' : 's'}${b.missing ? `, ${b.missing} missing` : ''}">
+    <span class="dnum">${label}</span><span class="dpct">${Math.round(b.pct)}%</span>
+    <span class="dn">${b.n}${b.missing ? ' <span class="dmiss">•</span>' : ''}</span></button>`;
+}
+
+function renderCalendar() {
+  const all = student().classes.map((c) => mergeClass(c, config));
+  if (state.cal.classId && !all.some((c) => c.id === state.cal.classId)) state.cal.classId = '';
+  const t = today();
+  const picked = state.cal.classId ? all.filter((c) => c.id === state.cal.classId) : all;
+  // Some teachers date standards scores at the end of the term; leave graded-but-future items out.
+  let future = 0;
+  const scope = picked.map((c) => ({ ...c, assignments: c.assignments.filter((a) => {
+    const later = a.date > t && a.score != null && !a.exempt;
+    if (later) future++;
+    return !later;
+  }) }));
+  const { days, weeks } = aggregate(scope);
+  const filter = `<select data-act="cal-class" aria-label="Class"><option value="">All classes</option>
+    ${all.map((c) => `<option value="${esc(c.id)}" ${c.id === state.cal.classId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`;
+  const head = `<div class="cal-bar"><h2>Grades by due date</h2>${filter}</div>
+    <p class="note">Each day is the plain average of every assignment due that day, with every assignment counting equally (points and category weights ignored). Missing work counts as 0%; exempt and ungraded work is left out. ▲/▼ compare a week with the one before.${future
+      ? ` ${future} graded item${future === 1 ? ' is' : 's are'} dated in the future (often standards scores dated at term end) and ${future === 1 ? "isn't" : "aren't"} shown.` : ''}</p>`;
+  if (!days.size) return `${head}<div class="empty">No graded work yet.</div>`;
+
+  const first = [...days.keys()].sort()[0];
+  const ranked = [...weeks.entries()].filter(([, b]) => b.n >= 3).sort((a, b) => a[1].pct - b[1].pct);
+  const span = (k, b) => `<button type="button" class="link" data-act="cal-sel" data-kind="week" data-key="${k}">week of ${fmtDate(k)}</button> (${b.pct.toFixed(0)}%, ${b.n})`;
+  const extremes = ranked.length >= 2
+    ? `<p class="cal-ext">Strongest: ${span(...ranked[ranked.length - 1])} · Weakest: ${span(...ranked[0])}</p>` : '';
+
+  const monthsHtml = monthsBetween(first, t).reverse().map((ym) => {
+    const firstDay = `${ym}-01`;
+    const lastDay = addDays(`${addDays(firstDay, 32).slice(0, 7)}-01`, -1); // day before the 1st of next month
+    const rows = [];
+    for (let mon = weekStart(firstDay); mon <= lastDay; mon = addDays(mon, 7)) {
+      const cells = DOW.map((_, i) => {
+        const d = addDays(mon, i);
+        if (d.slice(0, 7) !== ym) return '<div class="day out"></div>';
+        const cls = [d === t ? 'today' : '', d > t ? 'future' : '', i >= 5 ? 'wkend' : '',
+          state.cal.sel?.kind === 'day' && state.cal.sel.key === d ? 'sel' : ''].join(' ');
+        return calCell(days.get(d), Number(d.slice(8)), `data-act="cal-sel" data-kind="day" data-key="${d}"`, cls);
+      }).join('');
+      const w = weeks.get(mon), prev = weeks.get(addDays(mon, -7));
+      const delta = w && prev ? w.pct - prev.pct : null;
+      const arrow = delta == null ? '' : delta > 2 ? `<span class="wdelta up">▲${Math.round(delta)}</span>` : delta < -2 ? `<span class="wdelta down">▼${Math.round(-delta)}</span>` : '';
+      const wsel = state.cal.sel?.kind === 'week' && state.cal.sel.key === mon ? 'sel' : '';
+      const week = w
+        ? `<button type="button" class="day week g-${letter(w.pct)} ${wsel}" data-act="cal-sel" data-kind="week" data-key="${mon}" title="Week of ${fmtDate(mon)}: ${w.n} assignments">
+            <span class="dnum">Week</span><span class="dpct">${Math.round(w.pct)}%</span><span class="dn">${w.n} ${arrow}</span></button>`
+        : '<div class="day week none"><span class="dnum">Week</span></div>';
+      rows.push(cells + week);
+    }
+    const label = new Date(`${firstDay}T12:00:00`).toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+    return `<section class="card cal-month"><h3>${label}</h3>
+      <div class="cal-grid">${DOW.map((d, i) => `<div class="dow${i >= 5 ? ' wkend' : ''}">${d}</div>`).join('')}<div class="dow">Avg</div>${rows.join('')}</div></section>`;
+  }).join('');
+
+  // Detail for the selected day or week.
+  let detail = '<p class="note">Click a day or a week to see the assignments behind it.</p>';
+  const sel = state.cal.sel;
+  const b = sel && (sel.kind === 'day' ? days.get(sel.key) : weeks.get(sel.key));
+  if (b) {
+    const title = sel.kind === 'day' ? fmtLong(sel.key) : `Week of ${fmtDate(sel.key)} – ${fmtDate(addDays(sel.key, 6))}`;
+    const items = [...b.items].sort((x, y) => x.a.date.localeCompare(y.a.date) || x.pct - y.pct);
+    detail = `<h3>${title}</h3>
+      <div class="cal-sum">${pill(b.pct)} <span class="muted">${b.n} assignment${b.n === 1 ? '' : 's'}${b.missing ? ` · <span class="t-F">${b.missing} missing</span>` : ''}</span></div>
+      <table><tbody>${items.map(({ classId, className, a, pct }) => `<tr>
+        ${sel.kind === 'week' ? `<td class="nowrap muted">${fmtDate(a.date)}</td>` : ''}
+        <td><a class="plain" href="#class/${encodeURIComponent(classId)}">${esc(className)}</a><div class="tag">${esc(a.name)}${a.missing ? ' <span class="flag">missing</span>' : ''}</div></td>
+        <td class="num nowrap muted">${fmtScore(a.score)} / ${a.max}</td>
+        <td class="num"><span class="t-${letter(pct)}">${Math.round(pct)}%</span></td></tr>`).join('')}</tbody></table>`;
+  }
+  const legend = `<div class="legend">${config.gradeScale.map((g) => `<span class="pill g-${g.letter}">${g.letter}</span>`).join('')}
+    <span class="muted">daily average · • = includes missing work</span></div>`;
+  return `${head}${extremes}<div class="cal-cols"><div>${legend}${monthsHtml}</div><aside class="card cal-detail">${detail}</aside></div>`;
+}
+
 function currentClassId() {
   const m = location.hash.match(/^#class\/(.+)$/);
   return m ? decodeURIComponent(m[1]) : null;
@@ -419,6 +508,12 @@ function render() {
   document.body.classList.toggle('on-class', Boolean(cls));
   page.hidden = !cls;
   if (cls) page.innerHTML = renderClassPage(prepare(cls));
+
+  const onCal = location.hash === '#calendar';
+  document.body.classList.toggle('on-cal', onCal);
+  $('#calpage').hidden = !onCal;
+  if (onCal) $('#calpage').innerHTML = renderCalendar();
+  for (const a of document.querySelectorAll('#views a')) a.setAttribute('aria-current', String((a.getAttribute('href') === '#calendar') === onCal));
 
   const list = classes();
   renderSummary(list);
@@ -455,7 +550,8 @@ $('#students').addEventListener('click', (e) => {
   store.set('student', state.studentId);
   const url = new URL(location.href);
   url.searchParams.set('student', displayName(student()).toLowerCase());
-  url.hash = '';
+  url.hash = location.hash === '#calendar' ? '#calendar' : '';
+  state.cal = { classId: '', sel: null };
   history.replaceState(null, '', url);
   renderStudents();
   renderTerms();
@@ -534,6 +630,21 @@ cp.addEventListener('submit', (e) => {
   const category = fd.get('category') ?? null;
   (state.extras[id] ??= []).push({ name: String(fd.get('name') || '').trim() || `What-if ${category ?? 'assignment'}`, category, max, pct: null });
   saveExtras();
+  render();
+});
+
+const calEl = $('#calpage');
+calEl.addEventListener('click', (e) => {
+  const t = e.target.closest('[data-act="cal-sel"]');
+  if (!t) return;
+  const same = state.cal.sel?.kind === t.dataset.kind && state.cal.sel.key === t.dataset.key;
+  state.cal.sel = same ? null : { kind: t.dataset.kind, key: t.dataset.key };
+  render();
+  if (state.cal.sel && innerWidth < 1100) $('#calpage .cal-detail')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+});
+calEl.addEventListener('change', (e) => {
+  if (e.target.dataset.act !== 'cal-class') return;
+  state.cal = { classId: e.target.value, sel: null };
   render();
 });
 

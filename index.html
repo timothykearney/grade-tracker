@@ -6,7 +6,7 @@
   <meta name="robots" content="noindex, nofollow">
   <title>Grade Tracker</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%231f8a4c'/><text x='16' y='23' font-size='19' font-family='system-ui' font-weight='700' text-anchor='middle' fill='white'>A</text></svg>">
-  <link rel="stylesheet" href="styles.css?v=5cf5cebea9">
+  <link rel="stylesheet" href="styles.css?v=eb698fd18b">
 </head>
 <body>
   <header class="top">
@@ -26,6 +26,8 @@
       <p class="lock-msg note" aria-live="polite"></p>
     </form>
     <section class="summary" id="summary" aria-live="polite"></section>
+
+    <nav class="views" id="views" aria-label="View"><a href="#">Classes</a><a href="#calendar">Calendar</a></nav>
 
     <section class="whatif" id="whatif">
       <label class="switch">
@@ -52,10 +54,11 @@
 
     <section id="classes" class="classes"></section>
     <section id="classpage" class="classpage" hidden></section>
+    <section id="calpage" class="calpage" hidden></section>
 
     <footer class="foot muted" id="foot"></footer>
   </main>
 
-  <script type="module" src="js/app.js?v=5cf5cebea9"></script>
+  <script type="module" src="js/app.js?v=eb698fd18b"></script>
 </body>
 </html>
