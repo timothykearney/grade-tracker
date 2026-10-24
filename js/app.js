@@ -1,9 +1,9 @@
 import {
   mergeClass, classGrade, letterFor, gpa, timeline, recentAverage, project, neededFor, isRemaining,
-} from './grades.js?v=c9c0514c0b';
-import { unseal } from './vault.js?v=c9c0514c0b';
-import { expectedAssignments } from './expected.js?v=c9c0514c0b';
-import { aggregate, weekStart, addDays, monthsBetween } from './calendar.js?v=c9c0514c0b';
+} from './grades.js?v=6fbada2433';
+import { unseal } from './vault.js?v=6fbada2433';
+import { expectedAssignments } from './expected.js?v=6fbada2433';
+import { aggregate, weekStart, addDays, monthsBetween } from './calendar.js?v=6fbada2433';
 
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -20,7 +20,7 @@ const store = {
 let data, config, expected = {};
 const state = {
   studentId: null,
-  term: 'all',
+  periods: {}, // studentId -> selected grading period key
   sort: store.get('sort') ?? 'period',
   whatIf: { on: false, pct: 85, mode: 'flat' },
   overrides: new Map(), // "classId:index" -> pct
@@ -103,8 +103,9 @@ function prepare(c) {
   const m = mergeClass(c, config);
   // A finished quarter's ungraded items will never be graded: show them as not scored.
   if (m.final) m.assignments = m.assignments.map((a) => (a.score == null && !a.exempt ? { ...a, exempt: true, unscored: true } : a));
-  const exp = expectedAssignments(m.assignments, expected[c.id]);
-  const extras = (state.extras[c.id] ?? []).map((e, j) => ({ ...e, score: null, extra: j }));
+  // Planning (expected work, what-ifs) only applies to the period still in progress.
+  const exp = m.final ? [] : expectedAssignments(m.assignments, expected[c.id]);
+  const extras = m.final ? [] : (state.extras[c.id] ?? []).map((e, j) => ({ ...e, score: null, extra: j }));
   return {
     ...m,
     realCount: m.assignments.length,
@@ -114,8 +115,8 @@ function prepare(c) {
 }
 
 function classes() {
-  const all = student().classes.map(prepare);
-  const list = state.term === 'all' ? all : all.filter((c) => c.term === state.term);
+  const sel = selectedPeriod();
+  const list = student().classes.filter((c) => periodOf(c) === sel).map(prepare);
   const cur = (c) => classGrade(c).pct ?? 101;
   const sorters = {
     period: (a, b) => String(a.period).localeCompare(String(b.period), undefined, { numeric: true }),
@@ -143,7 +144,34 @@ function assumedPct(cls) {
 
 const today = () => new Date().toLocaleDateString('en-CA');
 const termInfo = (id) => config.calendar?.terms.find((t) => t.id === id);
-const periodLabel = (cls) => cls.semester ?? `${termInfo(cls.term)?.name ?? cls.term}${cls.final ? ' (final)' : ''}`;
+const semesterInfo = (name) => config.calendar?.semesters.find((x) => x.name === name);
+/** Grading period an entry belongs to: a quarter id ("Term 1") or a semester name. */
+const periodOf = (c) => c.periodKey ?? c.semester ?? c.term;
+const periodName = (key) => termInfo(key)?.name ?? key;
+const periodEnd = (key) => termInfo(key)?.end ?? semesterInfo(key)?.end;
+const periodLabel = (cls) => `${periodName(periodOf(cls))}${cls.final ? ' (final)' : ''}`;
+const hasGrades = (c) => c.assignments.some((a) => a.score != null && !a.exempt);
+
+/** This student's grading periods, in calendar order. */
+function periodsOf() {
+  const order = config.calendar?.terms.map((t) => t.id) ?? [];
+  const rank = (k) => (order.includes(k) ? order.indexOf(k) : order.indexOf(semesterInfo(k)?.terms[0] ?? '') + 0.5);
+  return [...new Set(student().classes.map(periodOf))].sort((a, b) => rank(a) - rank(b));
+}
+const periodIsFinal = (key) => student().classes.filter((c) => periodOf(c) === key).every((c) => c.final);
+
+/**
+ * The period shown: the user's pick, else the current period once it has any grades,
+ * else the latest period that has grades (so a brand-new quarter doesn't open empty).
+ */
+function selectedPeriod() {
+  const keys = periodsOf();
+  const pick = state.periods[state.studentId];
+  if (keys.includes(pick)) return pick;
+  const graded = (k) => student().classes.some((c) => periodOf(c) === k && hasGrades(c));
+  const current = keys.find((k) => !periodIsFinal(k)) ?? keys[keys.length - 1];
+  return graded(current) ? current : [...keys].reverse().find(graded) ?? current;
+}
 
 /** The grading period that matters for this student right now: { name, end, days }. */
 function gradingPeriod() {
@@ -200,12 +228,12 @@ function renderStudents() {
 }
 
 function renderTerms() {
-  const terms = [...new Set(student().classes.map((c) => c.term).filter(Boolean))];
-  const sel = $('#term');
-  sel.hidden = terms.length < 2;
-  if (!terms.includes(state.term)) state.term = 'all';
-  sel.innerHTML = `<option value="all">All terms</option>` +
-    terms.map((t) => `<option value="${esc(t)}" ${t === state.term ? 'selected' : ''}>${esc(t)}</option>`).join('');
+  const keys = periodsOf();
+  const cur = selectedPeriod();
+  const el = $('#term');
+  el.hidden = keys.length < 2;
+  el.innerHTML = keys.map((k) => `<button type="button" data-period="${esc(k)}" aria-pressed="${k === cur}">
+    ${esc(periodName(k))}<span class="muted">${periodIsFinal(k) ? ' · final' : ' · current'}</span></button>`).join('');
   $('#sort').value = state.sort;
 }
 
@@ -223,12 +251,15 @@ function renderSummary(list) {
   const below = graded.filter((p) => !['A', 'B'].includes(letter(p))).length;
   const remaining = list.reduce((n, c) => n + remainingCount(c), 0);
   const gp = gradingPeriod();
-  $('#summary').innerHTML =
-    (gp ? stat(`${esc(gp.name)} ends`, fmtDate(gp.end), null,
-      gp.days > 0 ? `${gp.days} day${gp.days === 1 ? '' : 's'} left` : gp.days === 0 ? 'today' : 'ended') : '') +
+  const sel = selectedPeriod();
+  const periodCard = periodIsFinal(sel)
+    ? stat(`${esc(periodName(sel))} ended`, fmtDate(periodEnd(sel)), null, 'final grades')
+    : gp ? stat(`${esc(gp.name)} ends`, fmtDate(gp.end), null,
+      gp.days > 0 ? `${gp.days} day${gp.days === 1 ? '' : 's'} left` : gp.days === 0 ? 'today' : 'ended') : '';
+  $('#summary').innerHTML = periodCard +
     stat('GPA', fmtGpa(w), fmtGpa(gpa(list, config, projected)), 'weighted') +
     stat('Unweighted', fmtGpa(u), fmtGpa(gpa(list, config, projected, { weighted: false })), '4.0 scale') +
-    stat('Classes', list.length, null, below ? `<span class="t-C">${below} below B</span>` : 'all A/B') +
+    stat('Classes', list.length, null, !graded.length ? 'no grades yet' : below ? `<span class="t-C">${below} below B</span>` : 'all A/B') +
     stat('Missing', `<span class="${missing ? 't-F' : ''}">${missing}</span>`, null, `${remaining} open or expected`);
 }
 
@@ -436,7 +467,7 @@ function renderCalendar() {
   }) }));
   const { days, weeks } = aggregate(scope);
   const filter = `<select data-act="cal-class" aria-label="Class"><option value="">All classes</option>
-    ${all.map((c) => `<option value="${esc(c.id)}" ${c.id === state.cal.classId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`;
+    ${[...new Map(all.map((c) => [c.id, c])).values()].map((c) => `<option value="${esc(c.id)}" ${c.id === state.cal.classId ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>`;
   const head = `<div class="cal-bar"><h2>Grades by due date</h2>${filter}</div>
     <p class="note">Each day is the plain average of every assignment due that day, with every assignment counting equally (points and category weights ignored). Missing work counts as 0%; exempt and ungraded work is left out. ▲/▼ compare a week with the one before.${future
       ? ` ${future} graded item${future === 1 ? ' is' : 's are'} dated in the future (often standards scores dated at term end) and ${future === 1 ? "isn't" : "aren't"} shown.` : ''}</p>`;
@@ -506,7 +537,11 @@ function render() {
     const owner = data.students.find((s) => s.classes.some((c) => c.id === id));
     if (owner) { state.studentId = owner.id; renderStudents(); renderTerms(); }
   }
-  const cls = id && student().classes.find((c) => c.id === id);
+  let cls = id && student().classes.find((c) => c.id === id && periodOf(c) === selectedPeriod());
+  if (id && !cls) {
+    cls = student().classes.filter((c) => c.id === id).pop();
+    if (cls) { state.periods[state.studentId] = periodOf(cls); renderTerms(); }
+  }
   const page = $('#classpage');
   document.body.classList.toggle('on-class', Boolean(cls));
   page.hidden = !cls;
@@ -527,7 +562,9 @@ function render() {
   el.classList.toggle('whatif-active', state.whatIf.on);
   const head = `<div class="row head-row col-h" aria-hidden="true"><div>Class</div><div>Trend</div>
     <div class="right">Last ${config.recentCount ?? 5}</div><div class="right">Now</div>${state.whatIf.on ? '<div class="right">Projected</div>' : ''}</div>`;
-  el.innerHTML = list.length ? head + list.map(renderRow).join('') : '<div class="empty">No classes for this term.</div>';
+  const none = list.length && !list.some(hasGrades)
+    ? `<div class="empty-note">No grades posted for ${esc(periodName(selectedPeriod()))} yet.${periodsOf().length > 1 ? ' Earlier periods are in the toggle above.' : ''}</div>` : '';
+  el.innerHTML = list.length ? none + head + list.map(renderRow).join('') : '<div class="empty">No classes for this period.</div>';
 
   const updated = data.updated ? new Date(data.updated).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : 'unknown';
   $('#foot').innerHTML = `<span>Updated ${esc(updated)}${data.source === 'sample' ? ' · sample data' : ''}</span>
@@ -561,7 +598,13 @@ $('#students').addEventListener('click', (e) => {
   render();
 });
 
-$('#term').addEventListener('change', (e) => { state.term = e.target.value; render(); });
+$('#term').addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-period]');
+  if (!b) return;
+  state.periods[state.studentId] = b.dataset.period;
+  renderTerms();
+  render();
+});
 $('#sort').addEventListener('change', (e) => { state.sort = e.target.value; store.set('sort', state.sort); render(); });
 $('#whatif-on').addEventListener('change', (e) => { state.whatIf.on = e.target.checked; render(); });
 $('#whatif-pct').addEventListener('input', (e) => {
