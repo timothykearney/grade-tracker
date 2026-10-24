@@ -1,9 +1,9 @@
 import {
   mergeClass, classGrade, letterFor, gpa, timeline, recentAverage, project, neededFor, isRemaining,
-} from './grades.js?v=eb698fd18b';
-import { unseal } from './vault.js?v=eb698fd18b';
-import { expectedAssignments } from './expected.js?v=eb698fd18b';
-import { aggregate, weekStart, addDays, monthsBetween } from './calendar.js?v=eb698fd18b';
+} from './grades.js?v=c9c0514c0b';
+import { unseal } from './vault.js?v=c9c0514c0b';
+import { expectedAssignments } from './expected.js?v=c9c0514c0b';
+import { aggregate, weekStart, addDays, monthsBetween } from './calendar.js?v=c9c0514c0b';
 
 const $ = (sel) => document.querySelector(sel);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -101,6 +101,8 @@ const letter = (pct) => letterFor(pct, config.gradeScale);
 /** A class ready for display: Aspen assignments, then pending expected ones, then this browser's what-ifs. */
 function prepare(c) {
   const m = mergeClass(c, config);
+  // A finished quarter's ungraded items will never be graded: show them as not scored.
+  if (m.final) m.assignments = m.assignments.map((a) => (a.score == null && !a.exempt ? { ...a, exempt: true, unscored: true } : a));
   const exp = expectedAssignments(m.assignments, expected[c.id]);
   const extras = (state.extras[c.id] ?? []).map((e, j) => ({ ...e, score: null, extra: j }));
   return {
@@ -141,7 +143,7 @@ function assumedPct(cls) {
 
 const today = () => new Date().toLocaleDateString('en-CA');
 const termInfo = (id) => config.calendar?.terms.find((t) => t.id === id);
-const periodLabel = (cls) => cls.semester ?? termInfo(cls.term)?.name ?? cls.term;
+const periodLabel = (cls) => cls.semester ?? `${termInfo(cls.term)?.name ?? cls.term}${cls.final ? ' (final)' : ''}`;
 
 /** The grading period that matters for this student right now: { name, end, days }. */
 function gradingPeriod() {
@@ -163,7 +165,8 @@ const missingCount = (cls) => cls.assignments.filter((a) => a.missing && !a.exem
 function pill(pct) {
   const l = letter(pct);
   if (!l) return '<span class="pill none">—</span>';
-  return `<span class="pill g-${l}">${l}<span class="pct">${pct.toFixed(1)}</span></span>`;
+  // Round to hundredths first, as Aspen does, so 91.4499… shows as 91.5 like Aspen's 91.45.
+  return `<span class="pill g-${l}">${l}<span class="pct">${(Math.round(pct * 100) / 100).toFixed(1)}</span></span>`;
 }
 
 function sparkline(points, big = false) {
@@ -348,7 +351,7 @@ function renderClassPage(cls) {
   <header class="cp-head">
     <div>
       <h2>${esc(cls.name)}${lvl ? ` <span class="level">${lvl}</span>` : ''}</h2>
-      <div class="meta">${[cls.teacher, periodLabel(cls)].filter(Boolean).map(esc).join(' · ')}${gp ? ` · ends ${fmtDate(gp.end)} (${gp.days} days)` : ''}</div>
+      <div class="meta">${[cls.teacher, periodLabel(cls)].filter(Boolean).map(esc).join(' · ')}${cls.final ? ` · ended ${fmtDate(termInfo(cls.term)?.end)}` : gp ? ` · ends ${fmtDate(gp.end)} (${gp.days} days)` : ''}</div>
     </div>
     <div class="cp-grades">
       <div><div class="col-h">Now</div>${pill(g.pct)}</div>
